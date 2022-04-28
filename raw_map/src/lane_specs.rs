@@ -2,6 +2,7 @@
 use std::iter;
 
 use abstutil::Tags;
+use geom::Distance;
 
 use crate::{osm, BufferType, Direction, DrivingSide, LaneSpec, LaneType, MapConfig};
 
@@ -302,6 +303,29 @@ pub fn get_lane_specs_ltr(tags: &Tags, cfg: &MapConfig) -> Vec<LaneSpec> {
         }
     }
 
+    // Playing fast-and-loose here (and not checking the lane being modified is a sidewalk) because
+    // of imminent cutover to osm2lanes, where this will be done way more carefully
+    if let Some(x) = tags
+        .get("sidewalk:left:width")
+        .and_then(|num| num.parse::<f64>().ok())
+    {
+        if cfg.driving_side == DrivingSide::Right {
+            back_side.last_mut().unwrap().width = Distance::meters(x);
+        } else {
+            fwd_side.last_mut().unwrap().width = Distance::meters(x);
+        }
+    }
+    if let Some(x) = tags
+        .get("sidewalk:right:width")
+        .and_then(|num| num.parse::<f64>().ok())
+    {
+        if cfg.driving_side == DrivingSide::Right {
+            fwd_side.last_mut().unwrap().width = Distance::meters(x);
+        } else {
+            back_side.last_mut().unwrap().width = Distance::meters(x);
+        }
+    }
+
     let mut need_fwd_shoulder = fwd_side
         .last()
         .map(|spec| spec.lt != LaneType::Sidewalk)
@@ -531,6 +555,7 @@ mod tests {
                 bikes_can_use_bus_lanes: true,
                 inferred_sidewalks: true,
                 street_parking_spot_length: geom::Distance::meters(8.0),
+                turn_on_red: true,
             };
             let actual = get_lane_specs_ltr(&tags(input.clone()), &cfg);
             let actual_lt: String = actual.iter().map(|s| s.lt.to_char()).collect();

@@ -43,6 +43,7 @@ pub(crate) use self::mechanics::{
     DrivingSimState, IntersectionSimState, ParkingSim, ParkingSimState, WalkingSimState,
 };
 pub(crate) use self::pandemic::PandemicModel;
+pub use self::prebake::PrebakeSummary;
 pub(crate) use self::recorder::TrafficRecorder;
 pub(crate) use self::router::{ActionAtEnd, Router};
 pub(crate) use self::scheduler::{Command, Scheduler};
@@ -59,6 +60,7 @@ mod events;
 mod make;
 mod mechanics;
 mod pandemic;
+pub mod prebake;
 mod recorder;
 mod render;
 mod router;
@@ -600,4 +602,8 @@ impl CreateCar {
             maybe_route: None,
         }
     }
+}
+
+pub fn pedestrian_body_radius() -> Distance {
+    map_model::SIDEWALK_THICKNESS / 4.0
 }

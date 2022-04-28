@@ -3,11 +3,10 @@ use std::collections::HashSet;
 use abstutil::{Counter, Timer};
 use map_model::{
     DirectedRoadID, IntersectionID, LaneID, Map, Path, PathConstraints, PathRequest, PathStep,
-    PathfinderCaching, Position, RoadID,
+    Pathfinder, Position, RoadID,
 };
 
-use super::{Cell, Neighborhood};
-use crate::App;
+use crate::{App, Cell, Neighborhood};
 
 pub struct RatRuns {
     pub paths: Vec<Path>,
@@ -59,11 +58,23 @@ pub fn find_rat_runs(app: &App, neighborhood: &Neighborhood, timer: &mut Timer) 
 
     let mut params = map.routing_params().clone();
     modal_filters.update_routing_params(&mut params);
+    // Don't allow leaving the neighborhood and using perimeter roads at all. Even if the optimal
+    // path is to leave and re-enter, don't do that. The point of this view is to show possible
+    // detours people might try to take in response to one filter. Note the original "demand model"
+    // input is bogus anyway; it's all possible entrances and exits to the neighborhood, without
+    // regards for the larger path somebody actually wants to take.
+    params.avoid_roads.extend(neighborhood.perimeter.clone());
+
+    let pathfinder = Pathfinder::new_dijkstra(map, params, vec![PathConstraints::Car], timer);
     let paths: Vec<Path> = timer
         .parallelize(
             "calculate paths between entrances and exits",
             requests,
-            |req| map.pathfind_with_params(req, &params, PathfinderCaching::CacheDijkstra),
+            |req| {
+                pathfinder
+                    .pathfind_v2(req, map)
+                    .and_then(|path| path.into_v1(map).ok())
+            },
         )
         .into_iter()
         .flatten()

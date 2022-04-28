@@ -7,7 +7,7 @@ extern crate anyhow;
 #[macro_use]
 extern crate log;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use anyhow::{Context, Result};
@@ -18,14 +18,14 @@ use abstio::{CityName, MapName};
 use abstutil::{deserialize_btreemap, serialize_btreemap, Tags};
 use geom::{Angle, Distance, GPSBounds, PolyLine, Polygon, Pt2D};
 
-pub use self::geometry::intersection_polygon;
+pub use self::geometry::{intersection_polygon, InputRoad};
 pub use self::lane_specs::get_lane_specs_ltr;
 pub use self::types::{
     Amenity, AmenityType, AreaType, BufferType, Direction, DrivingSide, IntersectionType, LaneSpec,
     LaneType, MapConfig, NamePerLanguage, NORMAL_LANE_THICKNESS, SIDEWALK_THICKNESS,
 };
 
-mod geometry;
+pub mod geometry;
 pub mod initial;
 mod lane_specs;
 pub mod osm;
@@ -109,6 +109,16 @@ impl OriginalRoad {
             "OriginalRoad::new({}, ({}, {}))",
             self.osm_way_id.0, self.i1.0, self.i2.0
         )
+    }
+
+    pub fn has_common_endpoint(&self, other: OriginalRoad) -> bool {
+        if self.i1 == other.i1 || self.i1 == other.i2 {
+            return true;
+        }
+        if self.i2 == other.i1 || self.i2 == other.i2 {
+            return true;
+        }
+        false
     }
 
     // TODO Doesn't handle two roads between the same pair of intersections
@@ -200,53 +210,96 @@ impl RawMap {
         &self,
         id: osm::NodeID,
     ) -> Result<(Polygon, Vec<Polygon>, Vec<(String, Polygon)>)> {
-        let intersection_roads: BTreeSet<OriginalRoad> =
-            self.roads_per_intersection(id).into_iter().collect();
-        let mut roads = BTreeMap::new();
-        for r in &intersection_roads {
-            roads.insert(*r, initial::Road::new(*r, &self.roads[r], &self.config)?);
+        let mut input_roads = Vec::new();
+        for r in self.roads_per_intersection(id) {
+            input_roads.push(initial::Road::new(self, r)?.to_input_road());
         }
-
-        // trim_roads_for_merging will be empty unless we've called merge_short_road
-        let (poly, debug) = intersection_polygon(
+        let results = intersection_polygon(
             id,
-            intersection_roads,
-            &mut roads,
+            input_roads,
+            // This'll be empty unless we've called merge_short_road
             &self.intersections[&id].trim_roads_for_merging,
         )?;
         Ok((
-            poly,
-            roads
-                .values()
-                .map(|r| r.trimmed_center_pts.make_polygons(2.0 * r.half_width))
+            results.intersection_polygon,
+            results
+                .trimmed_center_pts
+                .into_values()
+                .map(|(pl, half_width)| pl.make_polygons(2.0 * half_width))
                 .collect(),
-            debug,
+            results.debug,
         ))
     }
 
     /// Generate the trimmed `PolyLine` for a single RawRoad by calculating both intersections
-    pub fn trimmed_road_geometry(&self, road: OriginalRoad) -> Option<PolyLine> {
-        let mut roads = BTreeMap::new();
-        for id in [road.i1, road.i2] {
-            for r in self.roads_per_intersection(id) {
-                roads.insert(
-                    r,
-                    initial::Road::new(r, &self.roads[&r], &self.config).ok()?,
-                );
+    pub fn trimmed_road_geometry(&self, road_id: OriginalRoad) -> Result<PolyLine> {
+        // First trim at one of the endpoints
+        let trimmed_center_pts = {
+            let mut input_roads = Vec::new();
+            for r in self.roads_per_intersection(road_id.i1) {
+                input_roads.push(initial::Road::new(self, r)?.to_input_road());
             }
-        }
-        for id in [road.i1, road.i2] {
-            intersection_polygon(
-                id,
-                self.roads_per_intersection(id).into_iter().collect(),
-                &mut roads,
+            let mut results = intersection_polygon(
+                road_id.i1,
+                input_roads,
                 // TODO Not sure if we should use this or not
                 &BTreeMap::new(),
-            )
-            .unwrap();
+            )?;
+            results.trimmed_center_pts.remove(&road_id).unwrap().0
+        };
+
+        // Now the second
+        {
+            let mut input_roads = Vec::new();
+            for r in self.roads_per_intersection(road_id.i2) {
+                let mut road = initial::Road::new(self, r)?.to_input_road();
+                if r == road_id {
+                    road.center_pts = trimmed_center_pts.clone();
+                }
+                input_roads.push(road);
+            }
+            let mut results = intersection_polygon(
+                road_id.i2,
+                input_roads,
+                // TODO Not sure if we should use this or not
+                &BTreeMap::new(),
+            )?;
+            Ok(results.trimmed_center_pts.remove(&road_id).unwrap().0)
+        }
+    }
+
+    /// Returns the corrected (but untrimmed) center and total width for a road
+    pub fn untrimmed_road_geometry(&self, id: OriginalRoad) -> Result<(PolyLine, Distance)> {
+        let road = &self.roads[&id];
+        let lane_specs = get_lane_specs_ltr(&road.osm_tags, &self.config);
+        let mut total_width = Distance::ZERO;
+        let mut sidewalk_right = None;
+        let mut sidewalk_left = None;
+        for l in &lane_specs {
+            total_width += l.width;
+            if l.lt.is_walkable() {
+                if l.dir == Direction::Back {
+                    sidewalk_left = Some(l.width);
+                } else {
+                    sidewalk_right = Some(l.width);
+                }
+            }
         }
 
-        Some(roads.remove(&road).unwrap().trimmed_center_pts)
+        // If there's a sidewalk on only one side, adjust the true center of the road.
+        let mut true_center =
+            PolyLine::new(road.center_points.clone()).with_context(|| id.to_string())?;
+        match (sidewalk_right, sidewalk_left) {
+            (Some(w), None) => {
+                true_center = true_center.must_shift_right(w / 2.0);
+            }
+            (None, Some(w)) => {
+                true_center = true_center.must_shift_right(w / 2.0);
+            }
+            _ => {}
+        }
+
+        Ok((true_center, road.scale_width * total_width))
     }
 
     pub fn save(&self) {
@@ -324,6 +377,8 @@ pub struct RawRoad {
     /// cul-de-sac roads for roundabout handling. No transformation of these points whatsoever has
     /// happened.
     pub center_points: Vec<Pt2D>,
+    /// Multiply the width of each lane by this ratio, to prevent overlapping roads.
+    pub scale_width: f64,
     pub osm_tags: Tags,
     pub turn_restrictions: Vec<(RestrictionType, OriginalRoad)>,
     /// (via, to). For turn restrictions where 'via' is an entire road. Only BanTurns.
@@ -335,37 +390,19 @@ pub struct RawRoad {
 }
 
 impl RawRoad {
-    /// Returns the corrected center and total width
-    pub fn get_geometry(&self, id: OriginalRoad, cfg: &MapConfig) -> Result<(PolyLine, Distance)> {
-        let lane_specs = get_lane_specs_ltr(&self.osm_tags, cfg);
-        let mut total_width = Distance::ZERO;
-        let mut sidewalk_right = None;
-        let mut sidewalk_left = None;
-        for l in &lane_specs {
-            total_width += l.width;
-            if l.lt.is_walkable() {
-                if l.dir == Direction::Back {
-                    sidewalk_left = Some(l.width);
-                } else {
-                    sidewalk_right = Some(l.width);
-                }
-            }
+    pub fn new(osm_center_points: Vec<Pt2D>, osm_tags: Tags) -> Self {
+        Self {
+            center_points: osm_center_points,
+            scale_width: 1.0,
+            osm_tags,
+            turn_restrictions: Vec::new(),
+            complicated_turn_restrictions: Vec::new(),
+            percent_incline: 0.0,
+            // Start assuming there's a crosswalk everywhere, and maybe filter it down
+            // later
+            crosswalk_forward: true,
+            crosswalk_backward: true,
         }
-
-        // If there's a sidewalk on only one side, adjust the true center of the road.
-        let mut true_center =
-            PolyLine::new(self.center_points.clone()).with_context(|| id.to_string())?;
-        match (sidewalk_right, sidewalk_left) {
-            (Some(w), None) => {
-                true_center = true_center.must_shift_right(w / 2.0);
-            }
-            (None, Some(w)) => {
-                true_center = true_center.must_shift_right(w / 2.0);
-            }
-            _ => {}
-        }
-
-        Ok((true_center, total_width))
     }
 
     // TODO For the moment, treating all rail things as light rail
@@ -456,6 +493,16 @@ pub struct RawIntersection {
 }
 
 impl RawIntersection {
+    pub fn new(point: Pt2D, intersection_type: IntersectionType) -> Self {
+        Self {
+            point,
+            intersection_type,
+            // Filled out later
+            elevation: Distance::ZERO,
+            trim_roads_for_merging: BTreeMap::new(),
+        }
+    }
+
     fn is_border(&self) -> bool {
         self.intersection_type == IntersectionType::Border
     }

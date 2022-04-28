@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use osm::{NodeID, OsmID, RelationID, WayID};
 
-use abstio::MapName;
+use abstio::{CityName, MapName};
 use abstutil::{Tags, Timer};
 use geom::{Distance, FindClosest, HashablePt2D, Polygon, Pt2D, Ring};
 use kml::{ExtraShape, ExtraShapes};
@@ -101,7 +101,7 @@ pub fn extract_osm(
 
         way.tags.insert(osm::OSM_WAY_ID, id.0.to_string());
 
-        if is_road(&mut way.tags, opts) {
+        if is_road(&mut way.tags, opts, &map.name) {
             // TODO Hardcoding these overrides. OSM is correct, these don't have
             // sidewalks; there's a crosswalk mapped. But until we can snap sidewalks properly, do
             // this to prevent the sidewalks from being disconnected.
@@ -109,20 +109,8 @@ pub fn extract_osm(
                 way.tags.insert(osm::SIDEWALK, "right");
             }
 
-            out.roads.push((
-                id,
-                RawRoad {
-                    center_points: way.pts.clone(),
-                    osm_tags: way.tags.clone(),
-                    turn_restrictions: Vec::new(),
-                    complicated_turn_restrictions: Vec::new(),
-                    percent_incline: 0.0,
-                    // Start assuming there's a crosswalk everywhere, and maybe filter it down
-                    // later
-                    crosswalk_forward: true,
-                    crosswalk_backward: true,
-                },
-            ));
+            out.roads
+                .push((id, RawRoad::new(way.pts.clone(), way.tags.clone())));
             continue;
         } else if way.tags.is(osm::HIGHWAY, "service") {
             // If we got here, is_road didn't interpret it as a normal road
@@ -354,7 +342,7 @@ pub fn extract_osm(
     out
 }
 
-fn is_road(tags: &mut Tags, opts: &Options) -> bool {
+fn is_road(tags: &mut Tags, opts: &Options, name: &MapName) -> bool {
     if tags.is("area", "yes") {
         return false;
     }
@@ -505,6 +493,10 @@ fn is_road(tags: &mut Tags, opts: &Options) -> bool {
             if tags.is_any(osm::HIGHWAY, vec!["residential", "living_street"])
                 && !tags.is("dual_carriageway", "yes")
             {
+                tags.insert(osm::SIDEWALK, "both");
+            }
+            // Hack for Geneva, which maps sidewalks as separate ways
+            if name.city == CityName::new("ch", "geneva") {
                 tags.insert(osm::SIDEWALK, "both");
             }
         } else {

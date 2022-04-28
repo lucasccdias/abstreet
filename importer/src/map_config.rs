@@ -21,7 +21,7 @@ pub fn config_for_map(name: &MapName) -> convert_osm::Options {
     convert_osm::Options {
         map_config: map_model::MapConfig {
             driving_side: match name.city.country.as_ref() {
-                "au" | "gb" | "jp" | "nz" | "sg" => DrivingSide::Left,
+                "au" | "gb" | "in" | "jp" | "nz" | "sg" => DrivingSide::Left,
                 _ => DrivingSide::Right,
             },
             bikes_can_use_bus_lanes: name.city.country != "pl",
@@ -77,8 +77,11 @@ pub fn config_for_map(name: &MapName) -> convert_osm::Options {
             Some("http://metro.kingcounty.gov/GTFS/google_transit.zip".to_string())
         } else if name.city == CityName::new("us", "san_francisco") {
             Some("https://gtfs.sfmta.com/transitdata/google_transit.zip".to_string())
+        } else if name.city == CityName::new("br", "sao_paulo") {
+            Some("https://github.com/transitland/gtfs-archives-not-hosted-elsewhere/blob/master/sao-paulo-sptrans.zip?raw=true".to_string())
         } else {
             None
         },
+        elevation: true,
     }
 }

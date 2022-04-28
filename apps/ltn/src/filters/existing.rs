@@ -1,7 +1,7 @@
 use abstutil::{Tags, Timer};
 use geom::Distance;
 use map_gui::render::DrawMap;
-use map_model::{osm, Direction, LaneSpec, LaneType, Map, Road};
+use map_model::{osm, Map, Road};
 use widgetry::EventCtx;
 
 use crate::App;
@@ -11,42 +11,19 @@ use crate::App;
 /// for filters.
 pub fn transform_existing_filters(ctx: &EventCtx, app: &mut App, timer: &mut Timer) {
     let mut edits = app.map.get_edits().clone();
+    let mut filtered_roads = Vec::new();
     for r in detect_filters(&app.map) {
         edits.commands.push(app.map.edit_road_cmd(r.id, |new| {
-            // Use a fixed [sidewalk, driving, driving, sidewalk] configuration
-            let tags = Tags::empty();
-            let fwd = vec![
-                LaneSpec {
-                    lt: LaneType::Driving,
-                    dir: Direction::Fwd,
-                    width: LaneSpec::typical_lane_widths(LaneType::Driving, &tags)[0].0,
-                },
-                LaneSpec {
-                    lt: LaneType::Sidewalk,
-                    dir: Direction::Fwd,
-                    width: LaneSpec::typical_lane_widths(LaneType::Sidewalk, &tags)[0].0,
-                },
-            ];
-            let back = vec![
-                LaneSpec {
-                    lt: LaneType::Driving,
-                    dir: Direction::Back,
-                    width: LaneSpec::typical_lane_widths(LaneType::Driving, &tags)[0].0,
-                },
-                LaneSpec {
-                    lt: LaneType::Sidewalk,
-                    dir: Direction::Back,
-                    width: LaneSpec::typical_lane_widths(LaneType::Sidewalk, &tags)[0].0,
-                },
-            ];
-            new.lanes_ltr = LaneSpec::assemble_ltr(fwd, back, app.map.get_config().driving_side);
+            // Produce a fixed [sidewalk, driving, driving, sidewalk] configuration. We could get
+            // fancier and copy the tags of one of the roads we're connected to, but there might be
+            // turn lanes or something extraneous there.
+            let mut tags = Tags::empty();
+            tags.insert("highway", "residential");
+            tags.insert("lanes", "2");
+            tags.insert("sidewalk", "both");
+            new.lanes_ltr = raw_map::get_lane_specs_ltr(&tags, app.map.get_config());
         }));
-
-        // Don't call before_edit; this transformation happens before the user starts editing
-        app.session
-            .modal_filters
-            .roads
-            .insert(r.id, r.length() / 2.0);
+        filtered_roads.push(r.id);
     }
     if edits.commands.is_empty() {
         return;
@@ -74,6 +51,15 @@ pub fn transform_existing_filters(ctx: &EventCtx, app: &mut App, timer: &mut Tim
     // 3) The impact tool does use the contraction hierarchy for the "before" count. This should be
     //    fine -- the situation represented before the roads are transformed is what we want.
     app.map.keep_pathfinder_despite_edits();
+
+    // Create the filters after applying edits. Road length may change.
+    // (And don't call before_edit; this transformation happens before the user starts editing)
+    for r in filtered_roads {
+        app.session
+            .modal_filters
+            .roads
+            .insert(r, app.map.get_r(r).length() / 2.0);
+    }
 }
 
 fn detect_filters(map: &Map) -> Vec<&Road> {

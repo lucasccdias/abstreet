@@ -5,20 +5,7 @@ use map_gui::tools::Grid;
 use map_model::Map;
 use widgetry::{Color, GeomBatch};
 
-use super::Neighborhood;
-
-lazy_static::lazy_static! {
-    static ref COLORS: [Color; 6] = [
-        Color::BLUE,
-        Color::YELLOW,
-        Color::hex("#3CAEA3"),
-        Color::PURPLE,
-        Color::PINK,
-        Color::ORANGE,
-    ];
-}
-const CAR_FREE_COLOR: Color = Color::GREEN;
-const DISCONNECTED_COLOR: Color = Color::RED;
+use crate::{colors, Neighborhood};
 
 const RESOLUTION_M: f64 = 10.0;
 
@@ -53,7 +40,7 @@ impl RenderCells {
         let mut batch = GeomBatch::new();
         for (color, polygons) in self.colors.iter().zip(self.polygons_per_cell.iter()) {
             for poly in polygons {
-                batch.push(color.alpha(0.5), poly.clone());
+                batch.push(*color, poly.clone());
             }
         }
         batch
@@ -87,36 +74,47 @@ impl RenderCellsBuilder {
         );
 
         // Initially fill out the grid based on the roads in each cell
+        let mut warn_leak = true;
         for (cell_idx, cell) in neighborhood.cells.iter().enumerate() {
             for (r, interval) in &cell.roads {
                 let road = map.get_r(*r);
-                // Walk along the center line. We could look at the road's thickness and fill out
-                // points based on that, but the diffusion should take care of it.
-                for (pt, _) in road
+                // Some roads with a filter are _very_ short, and this fails. The connecting roads
+                // on either side should contribute a grid cell and wind up fine.
+                if let Ok(slice) = road
                     .center_pts
-                    .exact_slice(interval.start, interval.end)
-                    .step_along(Distance::meters(RESOLUTION_M / 2.0), Distance::ZERO)
+                    .maybe_exact_slice(interval.start, interval.end)
                 {
-                    let grid_idx = grid.idx(
-                        ((pt.x() - bounds.min_x) / RESOLUTION_M) as usize,
-                        ((pt.y() - bounds.min_y) / RESOLUTION_M) as usize,
-                    );
-                    // Due to tunnels/bridges, sometimes a road belongs to a neighborhood, but
-                    // leaks outside the neighborhood's boundary. Avoid crashing. The real fix is
-                    // to better define boundaries in the face of z-order changes.
-                    //
-                    // Example is https://www.openstreetmap.org/way/87298633
-                    if grid_idx >= grid.data.len() {
-                        warn!(
-                            "{} leaks outside its neighborhood's boundary polygon, near {}",
-                            road.id, pt
+                    // Walk along the center line. We could look at the road's thickness and fill
+                    // out points based on that, but the diffusion should take care of it.
+                    for (pt, _) in
+                        slice.step_along(Distance::meters(RESOLUTION_M / 2.0), Distance::ZERO)
+                    {
+                        let grid_idx = grid.idx(
+                            ((pt.x() - bounds.min_x) / RESOLUTION_M) as usize,
+                            ((pt.y() - bounds.min_y) / RESOLUTION_M) as usize,
                         );
-                        continue;
-                    }
+                        // Due to tunnels/bridges, sometimes a road belongs to a neighborhood, but
+                        // leaks outside the neighborhood's boundary. Avoid crashing. The real fix
+                        // is to better define boundaries in the face of z-order changes.
+                        //
+                        // Example is https://www.openstreetmap.org/way/87298633
+                        if grid_idx >= grid.data.len() {
+                            if warn_leak {
+                                warn!(
+                                    "{} leaks outside its neighborhood's boundary polygon, near {}",
+                                    road.id, pt
+                                );
+                                // In some neighborhoods, there are so many warnings that logging
+                                // causes noticeable slowdown!
+                                warn_leak = false;
+                            }
+                            continue;
+                        }
 
-                    // If roads from two different cells are close enough to clobber originally, oh
-                    // well?
-                    grid.data[grid_idx] = Some(cell_idx);
+                        // If roads from two different cells are close enough to clobber
+                        // originally, oh well?
+                        grid.data[grid_idx] = Some(cell_idx);
+                    }
                 }
             }
         }
@@ -143,9 +141,9 @@ impl RenderCellsBuilder {
         // Color car-free cells in a special way
         for (idx, cell) in neighborhood.cells.iter().enumerate() {
             if cell.car_free {
-                cell_colors[idx] = CAR_FREE_COLOR;
+                cell_colors[idx] = colors::CAR_FREE_CELL;
             } else if cell.is_disconnected() {
-                cell_colors[idx] = DISCONNECTED_COLOR;
+                cell_colors[idx] = colors::DISCONNECTED_CELL;
             }
         }
 
@@ -276,7 +274,8 @@ fn color_cells(num_cells: usize, adjacencies: HashSet<(usize, usize)>) -> Vec<Co
     // This is the same greedy logic as Perimeter::calculate_coloring
     let mut assigned_colors = Vec::new();
     for this_idx in 0..num_cells {
-        let mut available_colors: Vec<bool> = std::iter::repeat(true).take(COLORS.len()).collect();
+        let mut available_colors: Vec<bool> =
+            std::iter::repeat(true).take(colors::CELLS.len()).collect();
         // Find all neighbors
         for other_idx in 0..num_cells {
             if adjacencies.contains(&(this_idx, other_idx)) {
@@ -294,5 +293,8 @@ fn color_cells(num_cells: usize, adjacencies: HashSet<(usize, usize)>) -> Vec<Co
             assigned_colors.push(0);
         }
     }
-    assigned_colors.into_iter().map(|idx| COLORS[idx]).collect()
+    assigned_colors
+        .into_iter()
+        .map(|idx| colors::CELLS[idx])
+        .collect()
 }

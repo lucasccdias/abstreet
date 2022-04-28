@@ -11,7 +11,6 @@ mod geojson_to_osmosis;
 mod import_grid2demand;
 mod import_scenario;
 mod one_step_import;
-mod osm2lanes;
 
 use std::io::Write;
 
@@ -214,12 +213,13 @@ enum Command {
         #[structopt(flatten)]
         job: Job,
     },
-    /// Generates JSON test cases for osm2lanes.
-    #[structopt(name = "osm2lanes")]
-    OSM2Lanes {
-        /// The path to a map file
+    /// Simulate a full day of a scenario, and write the "prebaked results," so the UI can later be
+    /// used for A/B testing.
+    #[structopt(name = "prebake-scenario")]
+    PrebakeScenario {
+        /// The path to a scenario file
         #[structopt()]
-        map_path: String,
+        scenario_path: String,
     },
 }
 
@@ -329,7 +329,7 @@ async fn main() -> Result<()> {
         } => importer::regenerate_everything(shard_num, num_shards).await,
         Command::RegenerateEverythingExternally => regenerate_everything_externally()?,
         Command::Import { job } => job.run(&mut Timer::new("import one city")).await,
-        Command::OSM2Lanes { map_path } => osm2lanes::run(map_path),
+        Command::PrebakeScenario { scenario_path } => prebake_scenario(scenario_path),
     }
     Ok(())
 }
@@ -404,4 +404,11 @@ fn regenerate_everything_externally() -> Result<()> {
     println!("pueue status | grep Success | wc -l");
     println!("For the long-tail: pueue status | grep Running");
     Ok(())
+}
+
+fn prebake_scenario(path: String) {
+    let mut timer = Timer::new("prebake scenario");
+    let scenario: synthpop::Scenario = abstio::must_read_object(path, &mut timer);
+    let map = map_model::Map::load_synchronously(scenario.map_name.path(), &mut timer);
+    sim::prebake::prebake(&map, scenario, &mut timer);
 }

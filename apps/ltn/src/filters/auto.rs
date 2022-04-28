@@ -1,5 +1,7 @@
 //! Experiments to make a neighborhood be low-traffic by automatically placing filters to prevent all rat runs.
 
+use anyhow::Result;
+
 use abstutil::Timer;
 use map_model::RoadID;
 use widgetry::{Choice, EventCtx};
@@ -18,6 +20,8 @@ pub enum Heuristic {
     /// Try adding one filter to every possible road, counting the rat-runs after. Choose the next
     /// step by the least resulting rat runs.
     BruteForce,
+    /// Find one filter that splits a cell, maximizing the number of streets in each new cell.
+    SplitCells,
     /// Per cell, close all borders except for one. This doesn't affect connectivity, but prevents
     /// all rat-runs.
     OnlyOneBorder,
@@ -26,9 +30,16 @@ pub enum Heuristic {
 impl Heuristic {
     pub fn choices() -> Vec<Choice<Heuristic>> {
         vec![
-            Choice::new("greedy", Heuristic::Greedy),
-            Choice::new("brute-force", Heuristic::BruteForce),
-            Choice::new("only one border", Heuristic::OnlyOneBorder),
+            Choice::new(
+                "filter the road with the most rat-runs (greedy)",
+                Heuristic::Greedy,
+            ),
+            Choice::new(
+                "stop the most rat-runs (brute-force)",
+                Heuristic::BruteForce,
+            ),
+            Choice::new("split large cells", Heuristic::SplitCells),
+            Choice::new("only one entrance per cell", Heuristic::OnlyOneBorder),
         ]
     }
 
@@ -38,7 +49,7 @@ impl Heuristic {
         app: &mut App,
         neighborhood: &Neighborhood,
         timer: &mut Timer,
-    ) {
+    ) -> Result<()> {
         if neighborhood
             .cells
             .iter()
@@ -46,10 +57,7 @@ impl Heuristic {
             .count()
             != 0
         {
-            warn!(
-                "Not automatically changing this neighborhood; it already has a disconnected cell"
-            );
-            return;
+            bail!("This neighborhood has a disconnected cell; fix that first");
         }
 
         // TODO If we already have no rat-runs, stop
@@ -59,11 +67,17 @@ impl Heuristic {
         match self {
             Heuristic::Greedy => greedy(ctx, app, neighborhood, timer),
             Heuristic::BruteForce => brute_force(ctx, app, neighborhood, timer),
+            Heuristic::SplitCells => split_cells(ctx, app, neighborhood, timer),
             Heuristic::OnlyOneBorder => only_one_border(app, neighborhood),
         }
 
-        app.session.modal_filters.cancel_empty_edit();
+        let empty = app.session.modal_filters.cancel_empty_edit();
         after_edit(ctx, app);
+        if empty {
+            bail!("No new filters created");
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -108,6 +122,52 @@ fn brute_force(ctx: &EventCtx, app: &mut App, neighborhood: &Neighborhood, timer
             // TODO Again, break ties. Just the number of paths is kind of a weak metric.
             if best.map(|(_, score)| num_rat_runs < score).unwrap_or(true) {
                 best = Some((*r, num_rat_runs));
+            }
+            // Always undo the new filter between each test
+            app.session.modal_filters.roads.remove(r).unwrap();
+        }
+
+        assert_eq!(orig_filters, app.session.modal_filters.roads.len());
+    }
+
+    if let Some((r, _)) = best {
+        try_to_filter_road(ctx, app, neighborhood, r).unwrap();
+    }
+}
+
+fn split_cells(ctx: &EventCtx, app: &mut App, neighborhood: &Neighborhood, timer: &mut Timer) {
+    // Filtering which road leads to new cells with the MOST streets in the smaller cell?
+    let mut best: Option<(RoadID, usize)> = None;
+
+    let orig_filters = app.session.modal_filters.roads.len();
+    timer.start_iter(
+        "evaluate candidate filters",
+        neighborhood.orig_perimeter.interior.len(),
+    );
+    for r in &neighborhood.orig_perimeter.interior {
+        timer.next();
+        if app.session.modal_filters.roads.contains_key(r) {
+            continue;
+        }
+        if let Some(new) = try_to_filter_road(ctx, app, neighborhood, *r) {
+            // Did we split the cell?
+            if new.cells.len() > neighborhood.cells.len() {
+                // Find the two new cells
+                let split_cells: Vec<_> = new
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.roads.contains_key(r))
+                    .collect();
+                assert_eq!(2, split_cells.len());
+                // We want cells to be roughly evenly-sized. Just count the number of road segments
+                // as a proxy for that.
+                let new_score = split_cells[0].roads.len().min(split_cells[1].roads.len());
+                if best
+                    .map(|(_, old_score)| new_score > old_score)
+                    .unwrap_or(true)
+                {
+                    best = Some((*r, new_score));
+                }
             }
             // Always undo the new filter between each test
             app.session.modal_filters.roads.remove(r).unwrap();

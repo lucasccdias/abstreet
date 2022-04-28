@@ -257,8 +257,17 @@ impl Map {
     pub(crate) fn mut_lane(&mut self, id: LaneID) -> &mut Lane {
         &mut self.roads[id.road.0].lanes[id.offset]
     }
-    pub(crate) fn mut_road(&mut self, id: RoadID) -> &mut Road {
+    /// Public for importer. Do not abuse!
+    pub fn mut_road(&mut self, id: RoadID) -> &mut Road {
         &mut self.roads[id.0]
+    }
+    pub(crate) fn mut_turn(&mut self, id: TurnID) -> &mut Turn {
+        for turn in &mut self.intersections[id.parent.0].turns {
+            if turn.id == id {
+                return turn;
+            }
+        }
+        panic!("Couldn't find {id}");
     }
 
     pub fn get_i(&self, id: IntersectionID) -> &Intersection {
@@ -543,6 +552,10 @@ impl Map {
         &self.boundary_polygon
     }
 
+    pub fn get_pathfinder(&self) -> &Pathfinder {
+        &self.pathfinder
+    }
+
     pub fn pathfind(&self, req: PathRequest) -> Result<Path> {
         self.pathfind_v2(req)?.into_v1(self)
     }
@@ -579,11 +592,6 @@ impl Map {
     ) -> Option<(TransitStopID, Option<TransitStopID>, TransitRouteID)> {
         assert!(!self.pathfinder_dirty);
         self.pathfinder.should_use_transit(self, start, end)
-    }
-
-    /// Clear any pathfinders with custom RoutingParams, created previously with `cache_custom`
-    pub fn clear_custom_pathfinder_cache(&self) {
-        self.pathfinder.clear_custom_pathfinder_cache();
     }
 
     /// Return the cost of a single path, and also a mapping from every directed road to the cost
@@ -677,16 +685,6 @@ impl Map {
             osm_tags,
             osm_id: None,
         });
-    }
-
-    pub fn hack_override_routing_params(
-        &mut self,
-        routing_params: RoutingParams,
-        timer: &mut Timer,
-    ) {
-        self.routing_params = routing_params;
-        self.pathfinder_dirty = true;
-        self.recalculate_pathfinding_after_edits(timer);
     }
 
     /// Normally after applying edits, you must call `recalculate_pathfinding_after_edits`.
@@ -870,6 +868,27 @@ impl Map {
             self.routing_params().clone(),
             crate::pathfind::CreateEngine::CH,
             vec![PathConstraints::Car, PathConstraints::Bike],
+            timer,
+        );
+
+        // Remove all routes, since we remove that pathfinder
+        self.transit_stops.clear();
+        self.transit_routes.clear();
+        for r in &mut self.roads {
+            r.transit_stops.clear();
+        }
+    }
+
+    /// Modifies the map in-place, removing buildings.
+    pub fn minify_buildings(&mut self, timer: &mut Timer) {
+        self.buildings.clear();
+
+        // We only need the CHs for driving.
+        self.pathfinder = Pathfinder::new_limited(
+            self,
+            self.routing_params().clone(),
+            crate::pathfind::CreateEngine::CH,
+            vec![PathConstraints::Car],
             timer,
         );
 

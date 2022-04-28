@@ -1,30 +1,45 @@
+pub mod auto;
 mod existing;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use abstutil::{deserialize_btreemap, serialize_btreemap};
 use geom::{Circle, Distance, Line};
 use map_model::{IntersectionID, Map, RoadID, RoutingParams, TurnID};
 use widgetry::mapspace::{DrawUnzoomedShapes, ToggleZoomed};
-use widgetry::{Color, EventCtx, GeomBatch, GfxCtx};
+use widgetry::{EventCtx, GeomBatch, GfxCtx};
 
 pub use self::existing::transform_existing_filters;
-use crate::App;
+use crate::{after_edit, colors, App};
 
 /// Stored in App session state. Before making any changes, call `before_edit`.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ModalFilters {
+    // We use serialize_btreemap so that save::perma can detect and transform IDs
     /// For filters placed along a road, where is the filter located?
+    #[serde(
+        serialize_with = "serialize_btreemap",
+        deserialize_with = "deserialize_btreemap"
+    )]
     pub roads: BTreeMap<RoadID, Distance>,
+    #[serde(
+        serialize_with = "serialize_btreemap",
+        deserialize_with = "deserialize_btreemap"
+    )]
     pub intersections: BTreeMap<IntersectionID, DiagonalFilter>,
 
     /// Edit history is preserved recursively
     #[serde(skip_serializing, skip_deserializing)]
     pub previous_version: Box<Option<ModalFilters>>,
-    /// This changes every time an edit occurs
-    #[serde(skip_serializing, skip_deserializing)]
-    pub change_key: usize,
+}
+
+/// This logically changes every time an edit occurs. MapName isn't captured here.
+#[derive(Default, PartialEq)]
+pub struct ChangeKey {
+    roads: BTreeMap<RoadID, Distance>,
+    intersections: BTreeMap<IntersectionID, DiagonalFilter>,
 }
 
 /// A diagonal filter exists in an intersection. It's defined by two roads (the order is
@@ -49,21 +64,21 @@ impl ModalFilters {
     pub fn before_edit(&mut self) {
         let copy = self.clone();
         self.previous_version = Box::new(Some(copy));
-        self.change_key += 1;
     }
 
     /// If it's possible no edits were made, undo the previous call to `before_edit` and collapse
-    /// the redundant piece of history.
-    pub fn cancel_empty_edit(&mut self) {
+    /// the redundant piece of history. Returns true if the edit was indeed empty.
+    pub fn cancel_empty_edit(&mut self) -> bool {
         if let Some(prev) = self.previous_version.take() {
             if self.roads == prev.roads && self.intersections == prev.intersections {
                 self.previous_version = prev.previous_version;
-                // Leave change_key alone for simplicity
+                return true;
             } else {
                 // There was a real difference, keep
                 self.previous_version = Box::new(Some(prev));
             }
         }
+        false
     }
 
     /// Modify RoutingParams to respect these modal filters
@@ -88,26 +103,41 @@ impl ModalFilters {
         let mut batch = ToggleZoomed::builder();
         let mut low_zoom = DrawUnzoomedShapes::builder();
 
+        let line_thickness = Distance::meters(7.0);
+
         for (r, dist) in &self.roads {
             let road = map.get_r(*r);
             if let Ok((pt, angle)) = road.center_pts.dist_along(*dist) {
                 let road_width = road.get_width();
 
-                // TODO DrawUnzoomedShapes can do lines, but they don't stretch as the radius does,
-                // so it looks weird
-                low_zoom.add_circle(pt, Distance::meters(8.0), Color::RED);
-                low_zoom.add_circle(pt, Distance::meters(6.0), Color::WHITE);
+                low_zoom.add_circle(pt, road_width, *colors::FILTER_OUTER);
+                // Unzoomed lines aren't sufficient; they only vary the width. We need to stretch
+                // the line to cover the growing circle.
+                low_zoom.add_custom(Box::new(move |batch, thickness| {
+                    batch.push(
+                        *colors::FILTER_INNER,
+                        Line::must_new(
+                            pt.project_away(0.8 * thickness * road_width, angle.rotate_degs(90.0)),
+                            pt.project_away(0.8 * thickness * road_width, angle.rotate_degs(-90.0)),
+                        )
+                        .to_polyline()
+                        .make_polygons(thickness * line_thickness),
+                    );
+                }));
 
-                batch
-                    .unzoomed
-                    .push(Color::RED, Circle::new(pt, road_width).to_polygon());
+                // TODO Ideally we get rid of Toggle3Zoomed and make DrawUnzoomedShapes handle this
+                // medium-zoom case.
                 batch.unzoomed.push(
-                    Color::WHITE,
+                    *colors::FILTER_OUTER,
+                    Circle::new(pt, road_width).to_polygon(),
+                );
+                batch.unzoomed.push(
+                    *colors::FILTER_INNER,
                     Line::must_new(
                         pt.project_away(0.8 * road_width, angle.rotate_degs(90.0)),
                         pt.project_away(0.8 * road_width, angle.rotate_degs(-90.0)),
                     )
-                    .make_polygons(Distance::meters(7.0)),
+                    .make_polygons(line_thickness),
                 );
 
                 // TODO Only cover the driving/parking lanes (and center appropriately)
@@ -121,18 +151,33 @@ impl ModalFilters {
                 );
             }
         }
+
         for (_, filter) in &self.intersections {
             let line = filter.geometry(map);
 
-            // It's really hard to see a tiny squished line thickened, so use the same circle
-            // symbology at really low zooms
+            let length = line.length();
+            let angle = line.angle();
             let pt = line.middle().unwrap();
-            low_zoom.add_circle(pt, Distance::meters(8.0), Color::RED);
-            low_zoom.add_circle(pt, Distance::meters(6.0), Color::WHITE);
+            low_zoom.add_circle(pt, 0.7 * length, *colors::FILTER_OUTER);
+            low_zoom.add_custom(Box::new(move |batch, thickness| {
+                batch.push(
+                    *colors::FILTER_INNER,
+                    Line::must_new(
+                        pt.project_away(thickness * length / 2.0, angle),
+                        pt.project_away(thickness * length / 2.0, angle.opposite()),
+                    )
+                    .to_polyline()
+                    .make_polygons(thickness * line_thickness),
+                );
+            }));
 
+            batch.unzoomed.push(
+                *colors::FILTER_OUTER,
+                Circle::new(pt, 0.7 * length).to_polygon(),
+            );
             batch
                 .unzoomed
-                .push(Color::RED, line.make_polygons(Distance::meters(3.0)));
+                .push(*colors::FILTER_INNER, line.make_polygons(line_thickness));
 
             draw_zoomed_planters(
                 ctx,
@@ -142,22 +187,67 @@ impl ModalFilters {
         }
         Toggle3Zoomed::new(batch.build(ctx), low_zoom.build())
     }
+
+    pub fn get_change_key(&self) -> ChangeKey {
+        ChangeKey {
+            roads: self.roads.clone(),
+            intersections: self.intersections.clone(),
+        }
+    }
 }
 
 impl DiagonalFilter {
-    /// Find all possible diagonal filters at an intersection
-    pub fn filters_for(app: &App, i: IntersectionID) -> Vec<DiagonalFilter> {
+    pub fn cycle_through_alternatives(ctx: &EventCtx, app: &mut App, i: IntersectionID) {
+        app.session.modal_filters.before_edit();
         let map = &app.map;
         let roads = map.get_i(i).get_roads_sorted_by_incoming_angle(map);
-        // TODO Handle >4-ways
-        if roads.len() != 4 {
-            return Vec::new();
+
+        if roads.len() == 4 {
+            // 4-way intersections are the only place where true diagonal filters can be placed
+            let alt1 = DiagonalFilter::new(map, i, roads[0], roads[1]);
+            let alt2 = DiagonalFilter::new(map, i, roads[1], roads[2]);
+
+            match app.session.modal_filters.intersections.get(&i) {
+                Some(prev) => {
+                    if prev == &alt1 {
+                        app.session.modal_filters.intersections.insert(i, alt2);
+                    } else if prev == &alt2 {
+                        app.session.modal_filters.intersections.remove(&i);
+                    } else {
+                        unreachable!()
+                    }
+                }
+                None => {
+                    app.session.modal_filters.intersections.insert(i, alt1);
+                }
+            }
+        } else if roads.len() > 1 {
+            // Diagonal filters elsewhere don't really make sense. They're equivalent to filtering
+            // one road. Just cycle through those.
+            let mut add_filter_to = None;
+            if let Some(idx) = roads
+                .iter()
+                .position(|r| app.session.modal_filters.roads.contains_key(r))
+            {
+                app.session.modal_filters.roads.remove(&roads[idx]);
+                if idx != roads.len() - 1 {
+                    add_filter_to = Some(roads[idx + 1]);
+                }
+            } else {
+                add_filter_to = Some(roads[0]);
+            }
+            if let Some(r) = add_filter_to {
+                let road = map.get_r(r);
+                let dist = if i == road.src_i {
+                    Distance::ZERO
+                } else {
+                    road.length()
+                };
+                app.session.modal_filters.roads.insert(r, dist);
+            }
         }
 
-        vec![
-            DiagonalFilter::new(map, i, roads[0], roads[1]),
-            DiagonalFilter::new(map, i, roads[1], roads[2]),
-        ]
+        after_edit(ctx, app);
     }
 
     fn new(map: &Map, i: IntersectionID, r1: RoadID, r2: RoadID) -> DiagonalFilter {

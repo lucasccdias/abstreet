@@ -1,21 +1,22 @@
 use geom::Distance;
-use map_gui::tools::open_browser;
 use map_model::{IntersectionID, PathConstraints, RoadID};
 use widgetry::mapspace::{ObjectID, World, WorldOutcome};
+use widgetry::tools::open_browser;
 use widgetry::{
-    lctrl, Color, EventCtx, HorizontalAlignment, Image, Key, Panel, PanelBuilder, TextExt,
-    VerticalAlignment, Widget, DEFAULT_CORNER_RADIUS,
+    lctrl, EventCtx, Image, Key, Line, Panel, PanelBuilder, Text, TextExt, Widget,
+    DEFAULT_CORNER_RADIUS,
 };
 
+use crate::rat_runs::RatRuns;
 use crate::{
-    after_edit, App, BrowseNeighborhoods, DiagonalFilter, Neighborhood, NeighborhoodID, Transition,
+    after_edit, colors, App, BrowseNeighborhoods, DiagonalFilter, Neighborhood, NeighborhoodID,
+    Transition,
 };
 
 #[derive(PartialEq)]
 pub enum Tab {
     Connectivity,
     RatRuns,
-    Pathfinding,
 }
 
 impl Tab {
@@ -23,28 +24,28 @@ impl Tab {
         self,
         ctx: &mut EventCtx,
         app: &App,
+        top_panel: &Panel,
         per_tab_contents: Widget,
     ) -> PanelBuilder {
-        Panel::new_builder(Widget::col(vec![
-            crate::app_header(ctx, app),
-            Widget::row(vec![
-                ctx.style()
-                    .btn_back("Browse neighborhoods")
-                    .hotkey(Key::Escape)
-                    .build_def(ctx),
-                ctx.style()
-                    .btn_outline
-                    .text("Adjust boundary")
-                    .hotkey(Key::B)
-                    .build_def(ctx),
-            ]),
-            self.make_buttons(ctx),
+        let contents = Widget::col(vec![
+            app.session.alt_proposals.to_widget(ctx, app),
+            ctx.style()
+                .btn_back("Browse neighborhoods")
+                .hotkey(Key::Escape)
+                .build_def(ctx),
+            Line("Editing neighborhood")
+                .small_heading()
+                .into_widget(ctx),
             Widget::col(vec![
                 Widget::row(vec![
-                    Image::from_path("system/assets/tools/pencil.svg").into_widget(ctx),
-                    "Click a road or intersection to add or remove a modal filter"
-                        .text_widget(ctx)
+                    Image::from_path("system/assets/tools/pencil.svg")
+                        .into_widget(ctx)
                         .centered_vert(),
+                    Text::from(Line(
+                        "Click a road or intersection to add or remove a modal filter",
+                    ))
+                    .wrap_to_pct(ctx, 15)
+                    .into_widget(ctx),
                 ]),
                 Widget::row(vec![
                     format!(
@@ -63,9 +64,10 @@ impl Tab {
                 ]),
             ])
             .section(ctx),
-            per_tab_contents.section(ctx),
-        ]))
-        .aligned(HorizontalAlignment::Left, VerticalAlignment::Top)
+            self.make_buttons(ctx),
+            per_tab_contents,
+        ]);
+        crate::common::left_panel_builder(ctx, top_panel, contents)
     }
 
     pub fn handle_action(
@@ -75,45 +77,45 @@ impl Tab {
         action: &str,
         id: NeighborhoodID,
     ) -> Option<Transition> {
-        Some(match action {
+        match action {
             "Browse neighborhoods" => {
                 // Recalculate the state to redraw any changed filters
-                Transition::Replace(BrowseNeighborhoods::new_state(ctx, app))
+                Some(Transition::Replace(BrowseNeighborhoods::new_state(
+                    ctx, app,
+                )))
             }
-            "Adjust boundary" => Transition::Replace(
-                super::select_boundary::SelectBoundary::new_state(ctx, app, id),
-            ),
-            "Connectivity" => Tab::Connectivity.switch_to_state(ctx, app, id),
-            "Rat runs" => Tab::RatRuns.switch_to_state(ctx, app, id),
-            "Pathfinding" => Tab::Pathfinding.switch_to_state(ctx, app, id),
+            "Adjust boundary" => Some(Transition::Replace(
+                crate::select_boundary::SelectBoundary::new_state(ctx, app, id),
+            )),
+            "Connectivity" => Some(Transition::Replace(crate::connectivity::Viewer::new_state(
+                ctx, app, id,
+            ))),
+            "Rat runs" => Some(Transition::Replace(
+                crate::rat_run_viewer::BrowseRatRuns::new_state(ctx, app, id, None),
+            )),
             "undo" => {
                 let prev = app.session.modal_filters.previous_version.take().unwrap();
                 app.session.modal_filters = prev;
                 after_edit(ctx, app);
                 // Recreate the current state. This will reset any panel state (checkboxes and
                 // dropdowns)
-                self.switch_to_state(ctx, app, id)
+                Some(Transition::Replace(match self {
+                    Tab::Connectivity => crate::connectivity::Viewer::new_state(ctx, app, id),
+                    // TODO Preserve the current rat run
+                    Tab::RatRuns => {
+                        crate::rat_run_viewer::BrowseRatRuns::new_state(ctx, app, id, None)
+                    }
+                }))
             }
-            x => {
-                return crate::handle_app_header_click(ctx, app, x);
-            }
-        })
-    }
-
-    fn switch_to_state(self, ctx: &mut EventCtx, app: &mut App, id: NeighborhoodID) -> Transition {
-        Transition::Replace(match self {
-            Tab::Connectivity => super::connectivity::Viewer::new_state(ctx, app, id),
-            Tab::RatRuns => super::rat_run_viewer::BrowseRatRuns::new_state(ctx, app, id),
-            Tab::Pathfinding => super::pathfinding::RoutePlanner::new_state(ctx, app, id),
-        })
+            _ => None,
+        }
     }
 
     fn make_buttons(self, ctx: &mut EventCtx) -> Widget {
         let mut row = Vec::new();
         for (tab, label, key) in [
-            (Tab::Connectivity, "Connectivity", Key::Num1),
-            (Tab::RatRuns, "Rat runs", Key::Num2),
-            (Tab::Pathfinding, "Pathfinding", Key::Num3),
+            (Tab::Connectivity, "Connectivity", Key::F1),
+            (Tab::RatRuns, "Rat runs", Key::F2),
         ] {
             // TODO Match the TabController styling
             row.push(
@@ -132,6 +134,21 @@ impl Tab {
                     .build_def(ctx),
             );
         }
+        // TODO The 3rd doesn't really act like a tab
+        row.push(
+            ctx.style()
+                .btn_tab
+                .text("Adjust boundary")
+                .corner_rounding(geom::CornerRadii {
+                    top_left: DEFAULT_CORNER_RADIUS,
+                    top_right: DEFAULT_CORNER_RADIUS,
+                    bottom_left: 0.0,
+                    bottom_right: 0.0,
+                })
+                .hotkey(Key::B)
+                .build_def(ctx),
+        );
+
         Widget::row(row)
     }
 }
@@ -143,25 +160,29 @@ pub enum FilterableObj {
 }
 impl ObjectID for FilterableObj {}
 
-/// Adds clickable objects for managing filters on roads and intersections. The caller is
-/// responsible for base drawing behavior, initialize_hover, etc.
-pub fn populate_world<T: ObjectID, F: Fn(FilterableObj) -> T>(
+/// Creates clickable objects for managing filters on roads and intersections. Everything is
+/// invisible; the caller is responsible for drawing things.
+pub fn make_world(
     ctx: &mut EventCtx,
     app: &App,
     neighborhood: &Neighborhood,
-    world: &mut World<T>,
-    wrap_id: F,
-    zorder: usize,
-) {
+    rat_runs: &RatRuns,
+) -> World<FilterableObj> {
     let map = &app.map;
+    let mut world = World::bounded(map.get_bounds());
 
     for r in &neighborhood.orig_perimeter.interior {
+        let road = map.get_r(*r);
         world
-            .add(wrap_id(FilterableObj::InteriorRoad(*r)))
-            .hitbox(map.get_r(*r).get_thick_polygon())
-            .zorder(zorder)
+            .add(FilterableObj::InteriorRoad(*r))
+            .hitbox(road.get_thick_polygon())
             .drawn_in_master_batch()
-            .hover_outline(Color::BLACK, Distance::meters(5.0))
+            .hover_outline(colors::OUTLINE, Distance::meters(5.0))
+            .tooltip(Text::from(format!(
+                "{} rat-runs cross {}",
+                rat_runs.count_per_road.get(*r),
+                road.get_name(app.opts.language.as_ref()),
+            )))
             .hotkey(lctrl(Key::D), "debug")
             .clickable()
             .build(ctx);
@@ -169,15 +190,21 @@ pub fn populate_world<T: ObjectID, F: Fn(FilterableObj) -> T>(
 
     for i in &neighborhood.interior_intersections {
         world
-            .add(wrap_id(FilterableObj::InteriorIntersection(*i)))
+            .add(FilterableObj::InteriorIntersection(*i))
             .hitbox(map.get_i(*i).polygon.clone())
-            .zorder(zorder)
             .drawn_in_master_batch()
-            .hover_outline(Color::BLACK, Distance::meters(5.0))
+            .hover_outline(colors::OUTLINE, Distance::meters(5.0))
+            .tooltip(Text::from(format!(
+                "{} rat-runs cross this intersection",
+                rat_runs.count_per_intersection.get(*i)
+            )))
             .clickable()
             .hotkey(lctrl(Key::D), "debug")
             .build(ctx);
     }
+
+    world.initialize_hover(ctx);
+    world
 }
 
 /// If true, the neighborhood has changed and the caller should recalculate stuff, including the
@@ -212,32 +239,7 @@ pub fn handle_world_outcome(
             true
         }
         WorldOutcome::ClickedObject(FilterableObj::InteriorIntersection(i)) => {
-            if map.get_i(i).roads.len() != 4 {
-                // Misleading. Nothing changes, but we'll "fall through" to other cases without
-                // this
-                return true;
-            }
-
-            // Toggle through all possible filters
-            app.session.modal_filters.before_edit();
-            let mut all = DiagonalFilter::filters_for(app, i);
-            if let Some(current) = app.session.modal_filters.intersections.get(&i) {
-                let idx = all.iter().position(|x| x == current).unwrap();
-                if idx == all.len() - 1 {
-                    app.session.modal_filters.intersections.remove(&i);
-                } else {
-                    app.session
-                        .modal_filters
-                        .intersections
-                        .insert(i, all.remove(idx + 1));
-                }
-            } else if !all.is_empty() {
-                app.session
-                    .modal_filters
-                    .intersections
-                    .insert(i, all.remove(0));
-            }
-            after_edit(ctx, app);
+            DiagonalFilter::cycle_through_alternatives(ctx, app, i);
             true
         }
         WorldOutcome::Keypress("debug", FilterableObj::InteriorIntersection(i)) => {

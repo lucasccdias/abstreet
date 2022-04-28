@@ -6,8 +6,8 @@ use geo::prelude::ClosestPoint;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Angle, Bounds, Circle, Distance, GPSBounds, HashablePt2D, InfiniteLine, Line, Polygon, Pt2D,
-    Ring, EPSILON_DIST,
+    Angle, Bounds, Circle, Distance, GPSBounds, HashablePt2D, InfiniteLine, Line, LonLat, Polygon,
+    Pt2D, Ring, EPSILON_DIST,
 };
 
 // TODO How to tune this?
@@ -121,6 +121,14 @@ impl PolyLine {
         let mut pts = self.pts.clone();
         pts.reverse();
         PolyLine::must_new(pts)
+    }
+
+    /// Returns the quadrant where the overall angle of this polyline (pointing from the first to
+    /// last point) is in. Output between 0 and 3.
+    pub fn quadrant(&self) -> i64 {
+        let line_angle: f64 = self.overall_angle().normalized_radians();
+        let line_angle = (line_angle / (std::f64::consts::PI / 2.0)) as i64;
+        line_angle.rem_euclid(4) + 1
     }
 
     /// Glue together two polylines in order. The last point of `self` must be the same as the
@@ -415,6 +423,22 @@ impl PolyLine {
     /// Perpendicularly shifts the polyline to the right if positive or left if negative.
     pub fn shift_either_direction(&self, width: Distance) -> Result<PolyLine> {
         self.shift_with_corrections(width)
+    }
+
+    /// `self` represents some center, with `total_width`. Logically this shifts left by
+    /// `total_width / 2`, then right by `width_from_left_side`, but without exasperating sharp
+    /// bends.
+    pub fn shift_from_center(
+        &self,
+        total_width: Distance,
+        width_from_left_side: Distance,
+    ) -> Result<PolyLine> {
+        let half_width = total_width / 2.0;
+        if width_from_left_side < half_width {
+            self.shift_left(half_width - width_from_left_side)
+        } else {
+            self.shift_right(width_from_left_side - half_width)
+        }
     }
 
     // Things to remember about shifting polylines:
@@ -887,6 +911,28 @@ impl PolyLine {
             }
         }
         geojson::Geometry::new(geojson::Value::LineString(pts))
+    }
+
+    pub fn from_geojson(feature: &geojson::Feature, gps: Option<&GPSBounds>) -> Result<PolyLine> {
+        if let Some(geojson::Geometry {
+            value: geojson::Value::LineString(ref pts),
+            ..
+        }) = feature.geometry
+        {
+            let mut points = Vec::new();
+            for pt in pts {
+                let x = pt[0];
+                let y = pt[1];
+                if let Some(ref gps) = gps {
+                    points.push(LonLat::new(x, y).to_pt(gps));
+                } else {
+                    points.push(Pt2D::new(x, y));
+                }
+            }
+            PolyLine::new(points)
+        } else {
+            bail!("Input isn't a LineString")
+        }
     }
 
     /// Returns the point on the polyline closest to the query.

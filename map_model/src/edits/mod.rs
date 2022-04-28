@@ -9,14 +9,15 @@ use serde::{Deserialize, Serialize};
 
 use abstutil::Timer;
 use geom::{Distance, HashablePt2D, Line, Speed, Time};
-use raw_map::{get_lane_specs_ltr, initial};
+use raw_map::{get_lane_specs_ltr, InputRoad};
 
 pub use self::perma::PermanentMapEdits;
 use crate::make::{match_points_to_lanes, snap_driveway, trim_path};
 use crate::{
     connectivity, AccessRestrictions, BuildingID, ControlStopSign, ControlTrafficSignal, Direction,
     IntersectionID, IntersectionType, LaneID, LaneSpec, LaneType, Map, MapConfig, Movement,
-    ParkingLotID, PathConstraints, Pathfinder, Road, RoadID, TransitRouteID, TurnID, Zone,
+    ParkingLotID, PathConstraints, Pathfinder, Road, RoadID, TransitRouteID, TurnID, TurnType,
+    Zone,
 };
 
 mod compat;
@@ -38,6 +39,7 @@ pub struct MapEdits {
     /// Derived from commands, kept up to date by update_derived
     pub changed_roads: BTreeSet<RoadID>,
     pub original_intersections: BTreeMap<IntersectionID, EditIntersection>,
+    pub original_crosswalks: BTreeMap<IntersectionID, EditCrosswalks>,
     pub changed_routes: BTreeSet<TransitRouteID>,
 
     /// Some edits are included in the game by default, in data/system/proposals, as "community
@@ -61,6 +63,11 @@ pub struct EditRoad {
     pub speed_limit: Speed,
     pub access_restrictions: AccessRestrictions,
 }
+
+/// This must contain all crossing turns at one intersection, each mapped either to Crosswalk or
+/// UnmarkedCrossing
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditCrosswalks(pub BTreeMap<TurnID, TurnType>);
 
 impl EditRoad {
     pub fn get_orig_from_osm(r: &Road, cfg: &MapConfig) -> EditRoad {
@@ -189,12 +196,18 @@ pub enum EditCmd {
         old: Vec<Time>,
         new: Vec<Time>,
     },
+    ChangeCrosswalks {
+        i: IntersectionID,
+        old: EditCrosswalks,
+        new: EditCrosswalks,
+    },
 }
 
 pub struct EditEffects {
     pub changed_roads: BTreeSet<RoadID>,
     pub deleted_lanes: BTreeSet<LaneID>,
     pub changed_intersections: BTreeSet<IntersectionID>,
+    // TODO Will we need modified turns?
     pub added_turns: BTreeSet<TurnID>,
     pub deleted_turns: BTreeSet<TurnID>,
     pub changed_parking_lots: BTreeSet<ParkingLotID>,
@@ -212,6 +225,7 @@ impl MapEdits {
 
             changed_roads: BTreeSet::new(),
             original_intersections: BTreeMap::new(),
+            original_crosswalks: BTreeMap::new(),
             changed_routes: BTreeSet::new(),
         }
     }
@@ -225,8 +239,7 @@ impl MapEdits {
             Err(_) => {
                 // The JSON format may have changed, so attempt backwards compatibility.
                 let bytes = abstio::slurp_file(path)?;
-                let contents = std::str::from_utf8(&bytes)?;
-                let value = serde_json::from_str(contents)?;
+                let value = serde_json::from_slice(&bytes)?;
                 compat::upgrade(value, map)?
             }
         };
@@ -272,6 +285,7 @@ impl MapEdits {
     fn update_derived(&mut self, map: &Map) {
         self.changed_roads.clear();
         self.original_intersections.clear();
+        self.original_crosswalks.clear();
         self.changed_routes.clear();
 
         for cmd in &self.commands {
@@ -282,6 +296,11 @@ impl MapEdits {
                 EditCmd::ChangeIntersection { i, ref old, .. } => {
                     if !self.original_intersections.contains_key(i) {
                         self.original_intersections.insert(*i, old.clone());
+                    }
+                }
+                EditCmd::ChangeCrosswalks { i, ref old, .. } => {
+                    if !self.original_crosswalks.contains_key(i) {
+                        self.original_crosswalks.insert(*i, old.clone());
                     }
                 }
                 EditCmd::ChangeRouteSchedule { id, .. } => {
@@ -295,6 +314,8 @@ impl MapEdits {
         });
         self.original_intersections
             .retain(|i, orig| map.get_i_edit(*i) != orig.clone());
+        self.original_crosswalks
+            .retain(|i, orig| map.get_i_crosswalks_edit(*i) != orig.clone());
         self.changed_routes.retain(|br| {
             let r = map.get_tr(*br);
             r.spawn_times != r.orig_spawn_times
@@ -315,6 +336,13 @@ impl MapEdits {
                 i: *i,
                 old: old.clone(),
                 new: map.get_i_edit(*i),
+            });
+        }
+        for (i, old) in &self.original_crosswalks {
+            self.commands.push(EditCmd::ChangeCrosswalks {
+                i: *i,
+                old: old.clone(),
+                new: map.get_i_crosswalks_edit(*i),
             });
         }
         for r in &self.changed_routes {
@@ -394,6 +422,7 @@ impl EditCmd {
                 EditIntersection::TrafficSignal(_) => format!("traffic signal #{}", i.0),
                 EditIntersection::Closed => format!("close {}", i),
             },
+            EditCmd::ChangeCrosswalks { i, .. } => format!("crosswalks at {}", i),
             EditCmd::ChangeRouteSchedule { id, .. } => {
                 format!("reschedule route {}", map.get_tr(*id).short_name)
             }
@@ -470,6 +499,15 @@ impl EditCmd {
                     recalculate_turns(*i, map, effects);
                 }
             }
+            EditCmd::ChangeCrosswalks { i, ref new, .. } => {
+                if map.get_i_crosswalks_edit(*i) == new.clone() {
+                    return;
+                }
+                effects.changed_intersections.insert(*i);
+                for (turn, turn_type) in &new.0 {
+                    map.mut_turn(*turn).turn_type = *turn_type;
+                }
+            }
             EditCmd::ChangeRouteSchedule { id, new, .. } => {
                 map.transit_routes[id.0].spawn_times = new.clone();
             }
@@ -484,6 +522,11 @@ impl EditCmd {
                 new: old,
             },
             EditCmd::ChangeIntersection { i, old, new } => EditCmd::ChangeIntersection {
+                i,
+                old: new,
+                new: old,
+            },
+            EditCmd::ChangeCrosswalks { i, old, new } => EditCmd::ChangeCrosswalks {
                 i,
                 old: new,
                 new: old,
@@ -599,13 +642,12 @@ fn recalculate_intersection_polygon(
 ) -> Vec<RoadID> {
     let intersection = map.get_i(i);
 
-    let mut intersection_roads = BTreeSet::new();
-    let mut roads = BTreeMap::new();
-    let mut modify_roads = Vec::new();
+    let mut input_roads = Vec::new();
+    let mut id_mapping = BTreeMap::new();
     for r in &intersection.roads {
         let r = map.get_r(*r);
-        modify_roads.push((r.orig_id, r.id));
-        intersection_roads.insert(r.orig_id);
+        id_mapping.insert(r.orig_id, r.id);
+
         let half_width = if r.id == changed_road {
             changed_road_width / 2.0
         } else {
@@ -632,37 +674,29 @@ fn recalculate_intersection_polygon(
             trimmed_center_pts = pl;
         }
 
-        roads.insert(
-            r.orig_id,
-            initial::Road {
-                id: r.orig_id,
-                src_i: r.orig_id.i1,
-                dst_i: r.orig_id.i2,
-                trimmed_center_pts,
-                half_width,
-                // Unused
-                lane_specs_ltr: Vec::new(),
-                osm_tags: r.osm_tags.clone(),
-            },
-        );
+        input_roads.push(InputRoad {
+            id: r.orig_id,
+            center_pts: trimmed_center_pts,
+            half_width,
+            osm_tags: r.osm_tags.clone(),
+        });
     }
 
-    let polygon = raw_map::intersection_polygon(
+    let results = raw_map::intersection_polygon(
         intersection.orig_id,
-        intersection_roads,
-        &mut roads,
+        input_roads,
         // For consolidated intersections, it appears we don't need to pass in
         // trim_roads_for_merging. May revisit this later if needed.
         &BTreeMap::new(),
     )
-    .unwrap()
-    .0;
+    .unwrap();
 
-    map.intersections[i.0].polygon = polygon;
+    map.intersections[i.0].polygon = results.intersection_polygon;
     // Copy over the re-trimmed road centers
     let mut affected = Vec::new();
-    for (orig_id, id) in modify_roads {
-        map.roads[id.0].center_pts = roads.remove(&orig_id).unwrap().trimmed_center_pts;
+    for (orig_id, (pl, _)) in results.trimmed_center_pts {
+        let id = id_mapping[&orig_id];
+        map.roads[id.0].center_pts = pl;
         if id != changed_road {
             affected.push(id);
         }
@@ -804,6 +838,16 @@ impl Map {
         }
     }
 
+    pub fn get_i_crosswalks_edit(&self, i: IntersectionID) -> EditCrosswalks {
+        let mut turns = BTreeMap::new();
+        for turn in &self.get_i(i).turns {
+            if turn.turn_type.pedestrian_crossing() {
+                turns.insert(turn.id, turn.turn_type);
+            }
+        }
+        EditCrosswalks(turns)
+    }
+
     pub fn save_edits(&self) {
         // Don't overwrite the current edits with the compressed first. Otherwise, undo/redo order
         // in the UI gets messed up.
@@ -820,6 +864,12 @@ impl Map {
 
     pub fn try_apply_edits(&mut self, new_edits: MapEdits, timer: &mut Timer) {
         self.apply_edits(new_edits, false, timer);
+    }
+
+    /// A hack. Use this to apply edits, then save the map anyway, pretending like the edits came
+    /// from raw data.
+    pub fn clear_edits_before_save(&mut self) {
+        self.edits = self.new_edits();
     }
 
     // new_edits don't necessarily have to be valid; this could be used for speculatively testing

@@ -1,9 +1,11 @@
+mod lasso;
 mod load;
 mod popup;
 pub(crate) mod screenshot;
 mod url;
 pub(crate) mod warper;
 
+pub use lasso::{Lasso, PolyLineLasso};
 pub use load::{FileLoader, FutureLoader, RawBytes};
 pub use popup::PopupMsg;
 pub use url::URLManager;
@@ -64,4 +66,8 @@ impl<K: PartialEq + Clone, V> Default for Cached<K, V> {
     fn default() -> Self {
         Cached::new()
     }
+}
+
+pub fn open_browser<I: AsRef<str>>(url: I) {
+    let _ = webbrowser::open(url.as_ref());
 }

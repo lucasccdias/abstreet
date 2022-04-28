@@ -52,7 +52,7 @@ mod updater;
 mod waypoints;
 
 // Update this ___before___ pushing the commit with "[rebuild] [release]".
-const NEXT_RELEASE: &str = "0.3.13";
+const NEXT_RELEASE: &str = "0.3.20";
 
 /// Returns the version of A/B Street to link to. When building for a release, this points to that
 /// new release. Otherwise it points to the current dev version.
@@ -172,6 +172,7 @@ pub fn nice_map_name(name: &MapName) -> &str {
             ("dunton_hills", "center") => "Dunton Hills",
             ("ebbsfleet", "center") => "Ebbsfleet (Dartford)",
             ("exeter_red_cow_village", "center") => "Exeter Red Cow Village",
+            ("glenrothes", "center") => "Glenrothes (Scotland)",
             ("great_kneighton", "center") => "Great Kneighton (Cambridge)",
             ("halsnhead", "center") => "Halsnead",
             ("hampton", "center") => "Hampton",
@@ -184,6 +185,7 @@ pub fn nice_map_name(name: &MapName) -> &str {
             ("leeds", "west") => "West Leeds",
             ("lockleaze", "center") => "Lockleaze",
             ("london", "camden") => "Camden",
+            ("london", "central") => "Central London",
             ("london", "hackney") => "Hackney",
             ("london", "kennington") => "Kennington (London)",
             ("london", "kingston_upon_thames") => "Kingston upon Thames",
@@ -195,7 +197,10 @@ pub fn nice_map_name(name: &MapName) -> &str {
             ("newborough_road", "center") => "Newborough Road",
             ("newcastle_great_park", "center") => "Newcastle Great Park",
             ("newcastle_upon_tyne", "center") => "Newcastle upon Tyne",
+            ("nottingham", "center") => "Nottingham (city center)",
+            ("nottingham", "huge") => "Nottingham (entire area)",
             ("northwick_park", "center") => "Northwick Park",
+            ("oxford", "center") => "Oxford",
             ("poundbury", "center") => "Poundbury",
             ("priors_hall", "center") => "Priors Hall",
             ("st_albans", "center") => "St Albans",
@@ -214,6 +219,10 @@ pub fn nice_map_name(name: &MapName) -> &str {
         },
         "il" => match (name.city.city.as_ref(), name.map.as_ref()) {
             ("tel_aviv", "center") => "Tel Aviv (city center)",
+            _ => &name.map,
+        },
+        "in" => match (name.city.city.as_ref(), name.map.as_ref()) {
+            ("pune", "center") => "Pune",
             _ => &name.map,
         },
         "ir" => match (name.city.city.as_ref(), name.map.as_ref()) {
@@ -249,6 +258,7 @@ pub fn nice_map_name(name: &MapName) -> &str {
             _ => &name.map,
         },
         "tw" => match (name.city.city.as_ref(), name.map.as_ref()) {
+            ("keelung", "center") => "Keelung",
             ("taipei", "center") => "Taipei (city center)",
             _ => &name.map,
         },
@@ -305,6 +315,7 @@ pub fn nice_country_name(code: &str) -> &str {
         "fr" => "France",
         "gb" => "Great Britain",
         "il" => "Israel",
+        "in" => "India",
         "ir" => "Iran",
         "jp" => "Japan",
         "ly" => "Libya",
@@ -316,10 +327,6 @@ pub fn nice_country_name(code: &str) -> &str {
         "us" => "United States of America",
         _ => code,
     }
-}
-
-pub fn open_browser<I: AsRef<str>>(url: I) {
-    let _ = webbrowser::open(url.as_ref());
 }
 
 /// Returns the path to an executable. Native-only.

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io::Write;
 
 use abstio::{CityName, MapName};
@@ -178,20 +178,16 @@ impl Model {
             .hotkey(Key::Backspace, "delete")
             .hotkey(Key::T, "toggle stop sign / traffic signal")
             .hotkey(Key::P, "debug intersection geometry")
+            .hotkey(Key::D, "debug in OSM")
+            .hotkey(Key::X, "export to osm2polygon")
             .build(ctx);
     }
 
     pub fn create_i(&mut self, ctx: &EventCtx, point: Pt2D) {
         let id = self.map.new_osm_node_id(time_to_id());
-        self.map.intersections.insert(
-            id,
-            RawIntersection {
-                point,
-                intersection_type: IntersectionType::StopSign,
-                elevation: Distance::ZERO,
-                trim_roads_for_merging: BTreeMap::new(),
-            },
-        );
+        self.map
+            .intersections
+            .insert(id, RawIntersection::new(point, IntersectionType::StopSign));
         self.intersection_added(ctx, id);
     }
 
@@ -266,9 +262,9 @@ impl Model {
 // Roads
 impl Model {
     pub fn road_added(&mut self, ctx: &EventCtx, id: OriginalRoad) {
-        let road = &self.map.roads[&id];
-        let (center, total_width) = road.get_geometry(id, &self.map.config).unwrap();
+        let (center, total_width) = self.map.untrimmed_road_geometry(id).unwrap();
         let hitbox = center.make_polygons(total_width);
+        let road = &self.map.roads[&id];
         let mut draw = GeomBatch::new();
         draw.push(
             if road.osm_tags.is("junction", "intersection") {
@@ -294,6 +290,7 @@ impl Model {
             .hotkey(Key::X, "remove interior points")
             .hotkey(Key::M, "merge")
             .hotkey(Key::J, "mark/unmark as a junction")
+            .hotkey(Key::D, "debug in OSM")
             .build(ctx);
     }
 
@@ -335,18 +332,13 @@ impl Model {
 
         self.map.roads.insert(
             id,
-            RawRoad {
-                center_points: vec![
+            RawRoad::new(
+                vec![
                     self.map.intersections[&i1].point,
                     self.map.intersections[&i2].point,
                 ],
                 osm_tags,
-                turn_restrictions: Vec::new(),
-                complicated_turn_restrictions: Vec::new(),
-                percent_incline: 0.0,
-                crosswalk_forward: true,
-                crosswalk_backward: true,
-            },
+            ),
         );
         self.road_added(ctx, id);
 

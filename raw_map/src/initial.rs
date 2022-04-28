@@ -8,8 +8,7 @@ use anyhow::Result;
 use abstutil::{Tags, Timer};
 use geom::{Bounds, Circle, Distance, PolyLine, Polygon, Pt2D};
 
-use crate::{osm, IntersectionType, LaneSpec, MapConfig};
-use crate::{OriginalRoad, RawMap, RawRoad};
+use crate::{osm, InputRoad, IntersectionType, LaneSpec, OriginalRoad, RawMap};
 
 pub struct InitialMap {
     pub roads: BTreeMap<OriginalRoad, Road>,
@@ -21,6 +20,7 @@ pub struct InitialMap {
 pub struct Road {
     // Redundant but useful to embed
     pub id: OriginalRoad,
+    // TODO Just do id.i1
     pub src_i: osm::NodeID,
     pub dst_i: osm::NodeID,
     // The true center of the road, including sidewalks
@@ -31,9 +31,13 @@ pub struct Road {
 }
 
 impl Road {
-    pub fn new(id: OriginalRoad, r: &RawRoad, cfg: &MapConfig) -> Result<Road> {
-        let lane_specs_ltr = crate::lane_specs::get_lane_specs_ltr(&r.osm_tags, cfg);
-        let (trimmed_center_pts, total_width) = r.get_geometry(id, cfg)?;
+    pub fn new(map: &RawMap, id: OriginalRoad) -> Result<Road> {
+        let road = &map.roads[&id];
+        let mut lane_specs_ltr = crate::lane_specs::get_lane_specs_ltr(&road.osm_tags, &map.config);
+        for l in &mut lane_specs_ltr {
+            l.width *= road.scale_width;
+        }
+        let (trimmed_center_pts, total_width) = map.untrimmed_road_geometry(id)?;
 
         Ok(Road {
             id,
@@ -42,8 +46,17 @@ impl Road {
             trimmed_center_pts,
             half_width: total_width / 2.0,
             lane_specs_ltr,
-            osm_tags: r.osm_tags.clone(),
+            osm_tags: road.osm_tags.clone(),
         })
+    }
+
+    pub(crate) fn to_input_road(&self) -> InputRoad {
+        InputRoad {
+            id: self.id,
+            center_pts: self.trimmed_center_pts.clone(),
+            half_width: self.half_width,
+            osm_tags: self.osm_tags.clone(),
+        }
     }
 }
 
@@ -78,33 +91,41 @@ impl InitialMap {
             );
         }
 
-        for (id, r) in &raw.roads {
+        for (id, road) in &raw.roads {
+            let id = *id;
             if id.i1 == id.i2 {
                 warn!("Skipping loop {}", id);
                 continue;
             }
-            if PolyLine::new(r.center_points.clone()).is_err() {
+            if PolyLine::new(road.center_points.clone()).is_err() {
                 warn!("Skipping broken geom {}", id);
                 continue;
             }
 
-            m.intersections.get_mut(&id.i1).unwrap().roads.insert(*id);
-            m.intersections.get_mut(&id.i2).unwrap().roads.insert(*id);
+            m.intersections.get_mut(&id.i1).unwrap().roads.insert(id);
+            m.intersections.get_mut(&id.i2).unwrap().roads.insert(id);
 
-            m.roads.insert(*id, Road::new(*id, r, &raw.config).unwrap());
+            m.roads.insert(id, Road::new(raw, id).unwrap());
         }
 
         timer.start_iter("find each intersection polygon", m.intersections.len());
         for i in m.intersections.values_mut() {
             timer.next();
+            let input_roads = i
+                .roads
+                .iter()
+                .map(|r| m.roads[r].to_input_road())
+                .collect::<Vec<_>>();
             match crate::intersection_polygon(
                 i.id,
-                i.roads.clone(),
-                &mut m.roads,
+                input_roads,
                 &raw.intersections[&i.id].trim_roads_for_merging,
             ) {
-                Ok((poly, _)) => {
-                    i.polygon = poly;
+                Ok(results) => {
+                    i.polygon = results.intersection_polygon;
+                    for (r, (pl, _)) in results.trimmed_center_pts {
+                        m.roads.get_mut(&r).unwrap().trimmed_center_pts = pl;
+                    }
                 }
                 Err(err) => {
                     error!("Can't make intersection geometry for {}: {}", i.id, err);
@@ -145,14 +166,23 @@ impl InitialMap {
                     .extend_to_length(min_len)
                     .reversed();
             }
-            i.polygon = crate::intersection_polygon(
+
+            // Same boilerplate as above
+            let input_roads = i
+                .roads
+                .iter()
+                .map(|r| m.roads[r].to_input_road())
+                .collect::<Vec<_>>();
+            let results = crate::intersection_polygon(
                 i.id,
-                i.roads.clone(),
-                &mut m.roads,
+                input_roads,
                 &raw.intersections[&i.id].trim_roads_for_merging,
             )
-            .unwrap()
-            .0;
+            .unwrap();
+            i.polygon = results.intersection_polygon;
+            for (r, (pl, _)) in results.trimmed_center_pts {
+                m.roads.get_mut(&r).unwrap().trimmed_center_pts = pl;
+            }
             info!(
                 "Shifted border {} out a bit to make the road a reasonable length",
                 i.id

@@ -34,7 +34,9 @@ impl GenericCompareCounts {
                 return PopupMsg::new_state(ctx, "Error", vec![err.to_string()]);
             }
         };
-        let mut compare = CompareCounts::new(ctx, app, counts_a, counts_b, Layer::A);
+        let clickable_roads = false;
+        let mut compare =
+            CompareCounts::new(ctx, app, counts_a, counts_b, Layer::A, clickable_roads);
         compare.autoselect_layer();
 
         let panel = Panel::new_builder(Widget::col(vec![
@@ -71,7 +73,7 @@ impl SimpleState<App> for GenericCompareCounts {
         Transition::Keep
     }
 
-    fn draw(&self, g: &mut GfxCtx, _: &App) {
-        self.compare.draw(g);
+    fn draw(&self, g: &mut GfxCtx, app: &App) {
+        self.compare.draw(g, app);
     }
 }

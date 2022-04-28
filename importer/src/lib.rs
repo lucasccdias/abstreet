@@ -19,6 +19,7 @@ use map_model::RawToMapOptions;
 use self::configuration::{load_configuration, ImporterConfiguration};
 pub use self::pick_geofabrik::pick_geofabrik;
 
+mod basemap;
 mod berlin;
 mod configuration;
 mod map_config;
@@ -82,6 +83,7 @@ pub async fn oneshot(
             skip_local_roads: false,
             filter_crosswalks,
             gtfs_url: None,
+            elevation: false,
         },
         &mut timer,
     );
@@ -265,6 +267,19 @@ impl Job {
                         "distribute residents from planning areas for {}",
                         name.describe()
                     ));
+
+                    map.save();
+                }
+
+                if name == MapName::new("br", "sao_paulo", "sao_miguel_paulista") {
+                    basemap::override_sidewalk_widths(
+                        &mut map,
+                        abstio::path("system/proposals/smp_sidewalk_basemap.json"),
+                        timer,
+                    )
+                    .unwrap();
+
+                    map.save();
                 }
 
                 Some(map)
@@ -320,9 +335,16 @@ impl Job {
                 }
 
                 if self.city.country == "gb" {
-                    uk::generate_scenario(maybe_map.as_ref().unwrap(), &config, timer)
-                        .await
-                        .unwrap();
+                    if name == MapName::new("gb", "london", "central") {
+                        // No scenario for Central London, which has buildings stripped out
+                        let map = maybe_map.as_mut().unwrap();
+                        map.minify_buildings(timer);
+                        map.save();
+                    } else {
+                        uk::generate_scenario(maybe_map.as_ref().unwrap(), &config, timer)
+                            .await
+                            .unwrap();
+                    }
                 }
             }
             timer.stop(name.describe());

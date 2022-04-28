@@ -63,11 +63,6 @@ impl<I: ObjectID> WorldOutcome<I> {
     /// If the outcome references some ID, transform it to another type. This is useful when some
     /// component owns a World that contains a few different types of objects, some of which are
     /// managed by another component that only cares about its IDs.
-    pub fn map_id<O: ObjectID, F: Fn(I) -> O>(self, f: F) -> WorldOutcome<O> {
-        self.maybe_map_id(|id| Some(f(id))).unwrap()
-    }
-
-    /// Like `map_id`, but the transformation may fail.
     pub fn maybe_map_id<O: ObjectID, F: Fn(I) -> Option<O>>(self, f: F) -> Option<WorldOutcome<O>> {
         match self {
             WorldOutcome::ClickedFreeSpace(pt) => Some(WorldOutcome::ClickedFreeSpace(pt)),
@@ -238,6 +233,12 @@ impl<'a, ID: ObjectID> ObjectBuilder<'a, ID> {
     pub fn clickable(mut self) -> Self {
         assert!(!self.clickable, "called clickable twice");
         self.clickable = true;
+        self
+    }
+
+    /// Mark the object as clickable or not. `WorldOutcome::ClickedObject` will be fired.
+    pub fn set_clickable(mut self, clickable: bool) -> Self {
+        self.clickable = clickable;
         self
     }
 
@@ -413,6 +414,11 @@ impl<ID: ObjectID> World<ID> {
     /// of objects never change appearance.
     pub fn draw_master_batch<I: Into<ToggleZoomedBuilder>>(&mut self, ctx: &EventCtx, draw: I) {
         self.draw_master_batches.push(draw.into().build(ctx));
+    }
+
+    /// Like `draw_master_batch`, but for already-built objects.
+    pub fn draw_master_batch_built(&mut self, draw: ToggleZoomed) {
+        self.draw_master_batches.push(draw);
     }
 
     /// Let objects in the world respond to something happening.
